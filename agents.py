@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize Google Gemini
-genai.configure(api_key=os.getenv('AIzaSyAqXWeK7Uv_9JNK8IwdtBCAP60w7A-wB2g'))
+genai.configure(api_key=os.getenv('GOOGLE_API_KEY'))
 
 # Initialize ChromaDB client
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -32,21 +32,45 @@ class PreferenceAgent:
         """Extract preferences from user message"""
         user_lower = user_message.lower()
         
+        # Reset preferences for each query
+        self.user_preferences = {
+            'budget': None,
+            'category': None,
+            'needs': []
+        }
+        
         # Budget extraction
-        if '$' in user_message:
+        if '$' in user_message or 'under' in user_lower:
             import re
-            prices = re.findall(r'\$(\d+)', user_message)
+            prices = re.findall(r'(\d+)', user_message)
             if prices:
-                self.user_preferences['budget'] = int(prices[0])
+                self.user_preferences['budget'] = int(prices[-1])  # Take the last number
         
-        # Category extraction
-        categories = ['electronics', 'clothing', 'jewelry', 'jewelery', 'men', 'women']
-        for cat in categories:
-            if cat in user_lower:
-                self.user_preferences['category'] = cat
+        # Category extraction - use EXACT category names from dataset
+        # Dataset has: "jewelery" (not jewelry), "men's clothing", "women's clothing", "electronics"
+        categories_map = {
+            'electronics': ['electronics', 'phone', 'smartphone', 'monitor', 'ssd', 'hard drive', 'display', 'drive', 'storage'],
+            'jewelery': ['jewelry', 'jewelery', 'jewellery', 'bracelet', 'ring', 'earring', 'necklace', 'ornament', 'gold'],
+            "men's clothing": ['men', "men's", 'mens', 'jacket', 'shirt', 'backpack', 'tshirt', 't-shirt'],
+            "women's clothing": ['women', "women's", 'womens', 'coat', 'dress', 'raincoat', 'snowboard']
+        }
         
-        # Needs extraction
-        needs_keywords = ['backpack', 'bag', 'laptop', 'comfortable', 'affordable', 'cheap', 'shirt', 'jacket', 'phone', 'watch']
+        for category, keywords in categories_map.items():
+            for keyword in keywords:
+                if keyword in user_lower:
+                    self.user_preferences['category'] = category
+                    break
+            if self.user_preferences['category']:
+                break
+        
+        # Needs extraction - more comprehensive
+        needs_keywords = [
+            'backpack', 'bag', 'laptop', 'comfortable', 'affordable', 'cheap', 
+            'shirt', 'jacket', 'phone', 'smartphone', 'watch', 'monitor', 'display',
+            'ring', 'bracelet', 'earring', 'necklace', 'dress', 'coat', 'pants',
+            'ssd', 'drive', 'storage', 'gaming', 'slim', 'casual', 'premium', 'gold',
+            'ornament', 'raincoat', 'snowboard', 'tshirt', 't-shirt'
+        ]
         for keyword in needs_keywords:
             if keyword in user_lower and keyword not in self.user_preferences['needs']:
                 self.user_preferences['needs'].append(keyword)
@@ -75,7 +99,7 @@ class RecommendationAgent:
         # Search ChromaDB
         results = collection.query(
             query_texts=[query],
-            n_results=15
+            n_results=20
         )
         
         # Filter and format results
@@ -88,22 +112,46 @@ class RecommendationAgent:
             ):
                 relevance = (1 - distance) * 100
                 
-                # Quality filter
-                if relevance < 15:
+                # RELAXED Quality filter
+                if relevance < 25:  # Further relaxed to 25
                     continue
                 
-                # Budget filter (strict)
+                # Budget filter (STRICT)
                 if user_preferences['budget']:
                     price = float(metadata['price'])
                     if price > user_preferences['budget']:
                         continue
                 
-                # Category filter if specified
+                # Get product info
+                product_title = metadata['title'].lower()
+                product_category = metadata['category'].lower()
+                product_description = metadata.get('description', '').lower()
+                combined_text = f"{product_title} {product_category} {product_description}"
+                
+                # If user specified category, MUST match exactly
+                if user_preferences['category']:
+                    user_category = user_preferences['category'].lower()
+                    
+                    # Exact category match
+                    if user_category not in product_category:
+                        # Try keyword match
+                        category_words = user_category.split()
+                        category_match = False
+                        for word in category_words:
+                            if word in product_category:
+                                category_match = True
+                                break
+                        if not category_match:
+                            continue
+                
+                # Check for needs/keyword matches
                 if user_preferences['needs']:
-                    product_text = (metadata['title'] + ' ' + metadata['category']).lower()
-                    matches_need = any(need in product_text for need in user_preferences['needs'])
-                    if not matches_need:
-                        continue
+                    needs_match = False
+                    for need in user_preferences['needs']:
+                        if need.lower() in combined_text:
+                            needs_match = True
+                            break
+                    # If no needs match, still include (soft filter)
                 
                 recommendations.append({
                     'id': product_id,
@@ -286,6 +334,7 @@ class ShoppingAssistant:
                 response += f"   ⭐ Rating: {product['rating']}/5\n"
                 response += f"   📁 Category: {product['category']}\n"
                 response += f"   ✨ Match: {product['relevance']}%\n"
+                response += f"   🖼️ Image: {product['image']}\n"
                 response += f"   *[Product ID: {product['id']} - Say 'add {product['id']}' to add to cart]*"
         else:
             response += "❌ No products found matching your criteria. Try a different search!"
